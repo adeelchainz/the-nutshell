@@ -129,7 +129,7 @@ export function updateDOM(parent, oldVNode, newVNode, index = 0) {
     // Recursively diff children
     const max = Math.max(oldVNode.children.length, newVNode.children.length);
     for (let i = 0; i < max; i++) {
-      updateDOM(
+      scheduleUpdate(
         parent.childNodes[index],
         oldVNode.children[i],
         newVNode.children[i],
@@ -182,6 +182,28 @@ function updateProps(dom, oldProps, newProps) {
       dom[name] = newProps[name];
     }
   }
+}
+
+let updateQueue = [];
+let isUpdating = false;
+
+export function scheduleUpdate(parent, oldVNode, newVNode, index = 0) {
+  updateQueue.push(() => updateDOM(parent, oldVNode, newVNode, index));
+
+  if (!isUpdating) {
+    isUpdating = true;
+    requestAnimationFrame(() => {
+      flushUpdates();
+    });
+  }
+}
+
+function flushUpdates() {
+  while (updateQueue.length > 0) {
+    const updateFn = updateQueue.shift();
+    updateFn(); // Apply updates in batch
+  }
+  isUpdating = false;
 }
 
 export default {

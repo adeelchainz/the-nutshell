@@ -1,32 +1,35 @@
-import { createElement, updateDOM, render } from "../packages/CSR/csr";
+import { createElement, render, scheduleUpdate } from "../packages/CSR/csr";
 
 // Initial state
 let state = { count: 0 };
+let root = document.getElementById("root");
 
-// Function to handle button click
-function increment() {
-  state.count++;
-  update();
+// Function to update state and trigger a re-render
+function setState(newState) {
+  state = { ...state, ...newState }; // Merge new state
+  scheduleUpdate(root, currentVNode, App()); // Batch updates
+  currentVNode = App(); // Save latest virtual node
 }
 
-// Function to generate the virtual DOM
+// Counter component
 function App() {
   return createElement(
     "div",
-    { id: "app", style: "text-align: center;" },
-    createElement("h1", null, "Counter: ", state.count),
-    createElement("button", { onClick: increment }, "Increment")
+    {},
+    createElement("h1", {}, `Count: ${state.count}`),
+    createElement(
+      "button",
+      {
+        onClick: () => {
+          setState({ count: state.count + 1 });
+          setState({ count: state.count + 2 }); // Should be batched
+        },
+      },
+      "Increment"
+    )
   );
 }
 
-// Function to update the DOM
-function update() {
-  const newVNode = App();
-  updateDOM(root, vNode, newVNode);
-  vNode = newVNode;
-}
-
-// Mounting the app
-const root = document.getElementById("root");
-let vNode = App(); // Initial Virtual DOM
-root.appendChild(render(vNode)); // Initial render
+// Initial render
+let currentVNode = App();
+root.appendChild(render(currentVNode));

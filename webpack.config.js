@@ -1,6 +1,7 @@
 const path = require("path");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const webpack = require("webpack");
+const ESLintPlugin = require("eslint-webpack-plugin");
 
 module.exports = {
   mode: "development", // Set mode to development
@@ -33,5 +34,8 @@ module.exports = {
       template: "./index.html", // Ensure this file exists
     }),
     new webpack.HotModuleReplacementPlugin(), // Enable HMR
+    new ESLintPlugin({
+      extensions: ["js", "jsx"], // Run ESLint on JavaScript and JSX files
+    }),
   ],
 };
