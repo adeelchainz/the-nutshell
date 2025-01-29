@@ -15,36 +15,10 @@ function setState(newState) {
   currentVNode = App(); // Save latest virtual node
 }
 
-function createStyle(css) {
-  const style = document.createElement("style");
-  style.textContent = css;
-  document.head.appendChild(style);
-}
-
 // Counter component
 function App() {
-  createStyle(`
-    .container {
-      padding: 20px;
-      background-color: lightblue;
-    }
-    .heading {
-      color: darkblue;
-      font-size: 2em;
-    }
-    button {
-      background-color: green;
-      color: white;
-      padding: 10px;
-      border: none;
-      cursor: pointer;
-    }
-    button:hover {
-      background-color: darkgreen;
-    }
-  `);
   return (
-    <div className="container">
+    <div>
       <h1>Welcome to the App!</h1>
       <Counter
         count={state.count}
