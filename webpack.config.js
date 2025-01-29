@@ -34,4 +34,5 @@ module.exports = {
     }),
     new webpack.HotModuleReplacementPlugin(), // Enable HMR
   ],
+  devtool: "source-map", // Enable source maps for better debugging
 };

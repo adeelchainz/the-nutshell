@@ -1,3 +1,9 @@
 {
-  "presets": ["@babel/preset-env"]
+  "presets": ["@babel/preset-env",[
+      "@babel/preset-react",
+      {
+        "runtime": "classic",  // Uses classic JSX transform to call custom createElement
+        "pragma": "createElement"  // Use the custom createElement function instead of React.createElement
+      }
+    ]]
 }

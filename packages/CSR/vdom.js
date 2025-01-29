@@ -1,9 +1,15 @@
 // 1. Advanced Virtual DOM Representation with Events
 export function createElement(type, props, ...children) {
-  if (typeof type !== "string") {
-    console.error("Invalid element type: must be a string.");
-    throw new Error("Invalid element type: must be a string.");
+  if (typeof type !== "string" && typeof type !== "function") {
+    console.error("Invalid element type: must be a string or function.");
+    throw new Error("Invalid element type: must be a string or function.");
   }
+
+  // Handle functional components
+  if (typeof type === "function") {
+    return type(props); // Invoke the component and return its JSX output
+  }
+
   console.log("Creating element:", { type, props, children });
 
   // Create a virtual DOM element representation
