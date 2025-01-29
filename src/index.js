@@ -1,4 +1,6 @@
-import { createElement, render, scheduleUpdate } from "../packages/CSR/csr";
+import { createElement } from "../packages/CSR/vdom";
+import { scheduleUpdate } from "../packages/CSR/batch";
+import { render } from "../packages/CSR/csr";
 
 // Initial state
 let state = { count: 0 };
