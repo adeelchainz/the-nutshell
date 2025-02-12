@@ -1,9 +1,12 @@
 {
-  "presets": ["@babel/preset-env",[
-      "@babel/preset-react",
-      {
-        "runtime": "classic",  // Uses classic JSX transform to call custom createElement
-        "pragma": "createElement"  // Use the custom createElement function instead of React.createElement
-      }
-    ]]
+  "plugins": [
+    [
+      "@babel/plugin-transform-react-jsx",
+      { "pragma": "createElement", "runtime": "classic" }
+    ]
+  ],
+  "presets": [
+    // You might remove preset-react or ensure it doesn't conflict with the plugin.
+    "@babel/preset-env"
+  ]
 }
