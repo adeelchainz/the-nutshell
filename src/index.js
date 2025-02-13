@@ -76,7 +76,11 @@ function useEffect(effect, deps) {
 // ---------------------
 function convertStyleObjectToString(style) {
   return Object.entries(style)
-    .map(([key, value]) => `${key}: ${value}`)
+    .map(([key, value]) => {
+      // Convert camelCase to kebab-case (e.g., backgroundColor → background-color)
+      const kebabKey = key.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+      return `${kebabKey}: ${value}`;
+    })
     .join('; ');
 }
 
@@ -455,10 +459,11 @@ function runEffects(fiber) {
   if (!fiber) return;
   if (typeof fiber.type === 'function' && fiber.hooks) {
     fiber.hooks.forEach((hook) => {
-      // Optionally, you can check hook.hasChanged here
-      if (hook.effect) {
+      // Run effect on mount (if no alternate) or if dependencies have changed.
+      if (hook.effect && (!fiber.alternate || hook.hasChanged)) {
         console.log('[runEffects] Running effect for fiber:', fiber);
-        hook.effect();
+        const cleanup = hook.effect();
+        hook.cleanup = cleanup; // (You could later call this on unmount or re-run)
       }
     });
   }
@@ -577,28 +582,6 @@ requestIdleCallback(workLoop);
 // EXAMPLE USAGE
 // ---------------------
 
-// // Define a new virtual DOM to trigger an update.
-// const newVdom = (
-//   <div className='container'>
-//     <h1>Welcome Back!</h1>
-//     <MyComponent name='Universe' />
-//   </div>
-// );
-
-// console.log('[Example] New vdom:', newVdom);
-// console.log('[Example] New vdom object:', JSON.stringify(newVdom, null, 2));
-
-// // Kick off the render phase with the new virtual DOM.
-// render(newVdom, container);
-
-// const manualVdom = createElement(
-//   'div',
-//   { className: 'container' },
-//   createElement('h1', null, 'Welcome Back!'),
-//   createElement(MyComponent, { name: 'Universe' })
-// );
-
-// render(manualVdom, document.getElementById('root'));
 function MyComponent(props) {
   const [name, setName] = useState(props.name);
   console.log('[MyComponent] props:', props, 'state:', name);
@@ -630,5 +613,142 @@ function App() {
   );
 }
 
+// const container = document.getElementById('root');
+// render(App(), container);
+
+/** @jsx createElement */
+
+// ---------------------
+// Demo Components
+// ---------------------
+
+// A simple counter component.
+// function Counter() {
+//   const [count, setCount] = useState(0);
+
+//   useEffect(() => {
+//     console.log('[Counter] Count updated:', count);
+//   }, [count]);
+
+//   return (
+//     <div style={{ margin: '20px', padding: '10px', border: '1px solid #ccc' }}>
+//       <h2>Counter: {count}</h2>
+//       <button onClick={() => setCount(count + 1)}>Increment</button>
+//     </div>
+//   );
+// }
+
+// // An animated box that bounces horizontally.
+// // Using a simple module-level flag for demonstration:
+// let animationStarted = false;
+
+// // Using a simple module-level flag for demonstration:
+
+// function AnimatedBox() {
+//   const [{ position, direction }, setBox] = useState({
+//     position: 0,
+//     direction: 1,
+//   });
+//   const [running, setRunning] = useState(true);
+
+//   useEffect(() => {
+//     let animationFrameId;
+
+//     const animate = () => {
+//       setBox((prev) => {
+//         let newPos = prev.position + prev.direction * 5;
+//         let newDirection = prev.direction;
+//         // Bounce when reaching boundaries (0 and 300)
+//         if (newPos > 300 || newPos < 0) {
+//           newDirection = -prev.direction;
+//           newPos = Math.max(0, Math.min(300, newPos));
+//         }
+//         return { position: newPos, direction: newDirection };
+//       });
+//       // Only schedule the next frame if animation is running
+//       if (running) {
+//         animationFrameId = requestAnimationFrame(animate);
+//       }
+//     };
+
+//     // Start the animation loop if running
+//     if (running) {
+//       animationFrameId = requestAnimationFrame(animate);
+//     }
+
+//     // Cleanup: cancel the scheduled frame on unmount or when running changes
+//     return () => cancelAnimationFrame(animationFrameId);
+//   }, [running]); // Re-run this effect whenever the running state changes
+
+//   return (
+//     <div
+//       style={{
+//         position: 'relative',
+//         width: '350px',
+//         height: '150px',
+//         border: '2px solid #333',
+//         margin: '20px',
+//       }}
+//     >
+//       <div
+//         style={{
+//           position: 'absolute',
+//           left: position + 'px',
+//           top: '25px',
+//           width: '50px',
+//           height: '50px',
+//           backgroundColor: 'blue',
+//         }}
+//       ></div>
+//       <button
+//         style={{ marginTop: '80px', display: 'block' }}
+//         onClick={() => setRunning((prev) => !prev)}
+//       >
+//         {running ? 'Stop Animation' : 'Start Animation'}
+//       </button>
+//     </div>
+//   );
+// }
+
+// // (Existing) A component demonstrating state and effect hooks.
+// function MyComponent(props) {
+//   const [name, setName] = useState(props.name);
+//   console.log('[MyComponent] props:', props, 'state:', name);
+
+//   useEffect(() => {
+//     console.log('[MyComponent] useEffect: Name changed to', name);
+//   }, [name]);
+
+//   return (
+//     <div
+//       className='my-component'
+//       style={{ margin: '20px', padding: '10px', border: '1px solid #f90' }}
+//     >
+//       <span>Hello</span> {name}
+//       <button
+//         onClick={() => setName('Changed!')}
+//         style={{ marginLeft: '10px' }}
+//       >
+//         Change Name
+//       </button>
+//     </div>
+//   );
+// }
+
+// // The main App component that brings everything together.
+// function App() {
+//   return (
+//     <div style={{ fontFamily: 'Arial, sans-serif', padding: '20px' }}>
+//       <h1>Fiber Architecture Demo</h1>
+//       <Counter />
+//       <AnimatedBox />
+//       <MyComponent name='Fiber' />
+//     </div>
+//   );
+// }
+
+// // ---------------------
+// // Render the App
+// // ---------------------
 const container = document.getElementById('root');
 render(App(), container);
