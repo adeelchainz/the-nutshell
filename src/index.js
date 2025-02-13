@@ -11,6 +11,105 @@ if (!window.requestIdleCallback) {
   };
 }
 
+const ENABLE_VISUALIZATION = false;
+
+// ---------------------
+// PERFORMANCE & VISUALIZATION HELPERS
+// ---------------------
+function updateVisualization(fiberTree) {
+  if (ENABLE_VISUALIZATION) {
+    renderFiberVisualization(fiberTree);
+  }
+}
+
+// Convert a fiber tree into a hierarchical data structure for D3.
+function convertFiberToData(fiber) {
+  // Ensure a unique ID (for D3's key functions)
+  fiber.id = fiber.id || Math.random().toString(36).substr(2, 9);
+  const data = {
+    id: fiber.id,
+    // If the fiber is a function component, show its name
+    type:
+      typeof fiber.type === 'function'
+        ? fiber.type.name || 'Function'
+        : fiber.type,
+    effectTag: fiber.effectTag,
+    children: [],
+  };
+  if (fiber.child) {
+    let child = fiber.child;
+    while (child) {
+      data.children.push(convertFiberToData(child));
+      child = child.sibling;
+    }
+  }
+  return data;
+}
+
+// Use D3 to render the fiber tree visualization.
+function renderFiberVisualization(rootFiber) {
+  // Convert the fiber tree to D3 hierarchy data.
+  const rootData = d3.hierarchy(convertFiberToData(rootFiber));
+
+  // Create a tree layout.
+  const treeLayout = d3.tree().size([400, 800]); // [height, width]
+  treeLayout(rootData);
+
+  // Select the SVG container.
+  const svg = d3.select('#visualization');
+  svg.selectAll('*').remove(); // Clear previous visualization
+
+  // Draw links.
+  svg
+    .selectAll('.link')
+    .data(rootData.links())
+    .enter()
+    .append('line')
+    .attr('class', 'link')
+    .attr('x1', (d) => d.source.y + 50) // +50 to add margin
+    .attr('y1', (d) => d.source.x + 50)
+    .attr('x2', (d) => d.target.y + 50)
+    .attr('y2', (d) => d.target.x + 50)
+    .attr('stroke', '#ccc');
+
+  // Draw nodes.
+  const nodeGroup = svg
+    .selectAll('.node')
+    .data(rootData.descendants())
+    .enter()
+    .append('g')
+    .attr('class', 'node')
+    .attr('transform', (d) => `translate(${d.y + 50},${d.x + 50})`);
+
+  // Color nodes based on effectTag.
+  nodeGroup
+    .append('circle')
+    .attr('r', 15)
+    .style('fill', (d) => {
+      if (d.data.effectTag === 'PLACEMENT') return 'green';
+      if (d.data.effectTag === 'UPDATE') return 'blue';
+      if (d.data.effectTag === 'DELETION') return 'red';
+      return 'gray';
+    });
+
+  nodeGroup
+    .append('text')
+    .attr('dy', '.35em')
+    .attr('x', (d) => (d.children ? -20 : 20))
+    .style('text-anchor', (d) => (d.children ? 'end' : 'start'))
+    .text((d) => d.data.type);
+}
+
+// ---------------------
+// PERFORMANCE OBSERVER SETUP
+// ---------------------
+const perfObserver = new PerformanceObserver((list) => {
+  list.getEntries().forEach((entry) => {
+    console.log(`${entry.name}: ${entry.duration.toFixed(2)} ms`);
+  });
+});
+perfObserver.observe({ entryTypes: ['measure'] });
+
 // ---------------------
 // GLOBAL HOOK VARIABLES
 // ---------------------
@@ -434,13 +533,14 @@ function commitWork(fiber) {
 
 function commitChanges(rootFiber) {
   console.log('[commitChanges] Committing root fiber:', rootFiber);
-  // rootFiber.stateNode.innerHTML = '';
+  // Instrument commit phase
+  performance.mark('commit-start');
+
   if (rootFiber.child) {
     commitWork(rootFiber.child);
   }
   // Process deletions—skip fibers for function components.
   deletions.forEach((fiber) => {
-    // Skip deletion if the fiber is a function component.
     if (typeof fiber.type === 'function') return;
     let parentFiber = fiber.parent;
     while (parentFiber && !parentFiber.stateNode) {
@@ -453,17 +553,20 @@ function commitChanges(rootFiber) {
   });
   deletions = [];
   runEffects(rootFiber);
+
+  performance.mark('commit-end');
+  performance.measure('commit-phase', 'commit-start', 'commit-end');
+  updateVisualization(rootFiber);
 }
 
 function runEffects(fiber) {
   if (!fiber) return;
   if (typeof fiber.type === 'function' && fiber.hooks) {
     fiber.hooks.forEach((hook) => {
-      // Run effect on mount (if no alternate) or if dependencies have changed.
       if (hook.effect && (!fiber.alternate || hook.hasChanged)) {
         console.log('[runEffects] Running effect for fiber:', fiber);
         const cleanup = hook.effect();
-        hook.cleanup = cleanup; // (You could later call this on unmount or re-run)
+        hook.cleanup = cleanup;
       }
     });
   }
@@ -477,10 +580,12 @@ function runEffects(fiber) {
 let nextUnitOfWork = null;
 let wipRoot = null;
 let currentRoot = null;
-
 let lastVDom = null;
 
 function render(vdom, container) {
+  // Instrument render phase
+  performance.mark('render-start');
+
   lastVDom = vdom;
   console.log('[render] New render called with vdom:', vdom);
   if (!container) {
@@ -507,6 +612,9 @@ function render(vdom, container) {
   }
   nextUnitOfWork = wipRoot;
   console.log('[render] wipRoot set:', wipRoot);
+
+  performance.mark('render-end');
+  performance.measure('render-phase', 'render-start', 'render-end');
 }
 
 function beginWork(fiber) {
@@ -516,14 +624,11 @@ function beginWork(fiber) {
       '[beginWork] Function component detected:',
       fiber.type.name || fiber.type
     );
-    // Set up hooks for this function component.
     wipFiber = fiber;
     hookIndex = 0;
     fiber.hooks = [];
-    // Call the function component with its props.
     const children = fiber.type(fiber.props);
     console.log('[beginWork] Function component returned:', children);
-    // Build a fiber tree from the returned VDOM.
     const oldFiberChild = fiber.alternate ? fiber.alternate.child : null;
     fiber.child = diffFibers(oldFiberChild, children, fiber);
     return fiber.child;
@@ -537,7 +642,6 @@ function beginWork(fiber) {
 
 function completeWork(fiber) {
   console.log('[completeWork] Completing fiber:', fiber);
-  // In a more complete implementation, you could propagate info upward.
 }
 
 function performUnitOfWork(fiber) {
@@ -570,7 +674,6 @@ function workLoop(deadline) {
     wipRoot = null;
   }
 
-  // 🛑 Stop calling requestIdleCallback if there's no work left
   if (nextUnitOfWork || wipRoot) {
     requestIdleCallback(workLoop);
   }
@@ -598,12 +701,6 @@ function MyComponent(props) {
   );
 }
 
-const vdom = (
-  <div className='container'>
-    <h1>Welcome</h1>
-    <MyComponent name='World' />
-  </div>
-);
 function App() {
   return (
     <div className='container'>
@@ -613,23 +710,15 @@ function App() {
   );
 }
 
-// const container = document.getElementById('root');
-// render(App(), container);
-
-/** @jsx createElement */
-
 // ---------------------
 // Demo Components
 // ---------------------
-
 // A simple counter component.
 // function Counter() {
 //   const [count, setCount] = useState(0);
-
 //   useEffect(() => {
 //     console.log('[Counter] Count updated:', count);
 //   }, [count]);
-
 //   return (
 //     <div style={{ margin: '20px', padding: '10px', border: '1px solid #ccc' }}>
 //       <h2>Counter: {count}</h2>
@@ -637,23 +726,18 @@ function App() {
 //     </div>
 //   );
 // }
-
 // // An animated box that bounces horizontally.
 // // Using a simple module-level flag for demonstration:
 // let animationStarted = false;
-
 // // Using a simple module-level flag for demonstration:
-
 // function AnimatedBox() {
 //   const [{ position, direction }, setBox] = useState({
 //     position: 0,
 //     direction: 1,
 //   });
 //   const [running, setRunning] = useState(true);
-
 //   useEffect(() => {
 //     let animationFrameId;
-
 //     const animate = () => {
 //       setBox((prev) => {
 //         let newPos = prev.position + prev.direction * 5;
@@ -670,16 +754,13 @@ function App() {
 //         animationFrameId = requestAnimationFrame(animate);
 //       }
 //     };
-
 //     // Start the animation loop if running
 //     if (running) {
 //       animationFrameId = requestAnimationFrame(animate);
 //     }
-
 //     // Cleanup: cancel the scheduled frame on unmount or when running changes
 //     return () => cancelAnimationFrame(animationFrameId);
 //   }, [running]); // Re-run this effect whenever the running state changes
-
 //   return (
 //     <div
 //       style={{
@@ -709,16 +790,13 @@ function App() {
 //     </div>
 //   );
 // }
-
 // // (Existing) A component demonstrating state and effect hooks.
 // function MyComponent(props) {
 //   const [name, setName] = useState(props.name);
 //   console.log('[MyComponent] props:', props, 'state:', name);
-
 //   useEffect(() => {
 //     console.log('[MyComponent] useEffect: Name changed to', name);
 //   }, [name]);
-
 //   return (
 //     <div
 //       className='my-component'
@@ -734,7 +812,6 @@ function App() {
 //     </div>
 //   );
 // }
-
 // // The main App component that brings everything together.
 // function App() {
 //   return (
@@ -746,7 +823,6 @@ function App() {
 //     </div>
 //   );
 // }
-
 // // ---------------------
 // // Render the App
 // // ---------------------
