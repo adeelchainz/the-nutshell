@@ -42,15 +42,8 @@ function useState(initial) {
   const setState = (action) => {
     hook.queue.push(action);
     console.log('[useState] setState called. Scheduling re-render...');
-    // Re-render: create a new work-in-progress root using the current tree as alternate.
-    wipRoot = {
-      stateNode: currentRoot.stateNode,
-      props: currentRoot.props,
-      alternate: currentRoot,
-      type: 'ROOT',
-    };
-    nextUnitOfWork = wipRoot;
-    deletions = [];
+    render(App(), currentRoot.stateNode);
+    requestIdleCallback(workLoop);
   };
 
   // Save the hook on the fiber and move to the next hook index.
@@ -152,10 +145,19 @@ function dfs(vdom, parent = null) {
   if (typeof vdom.type === 'function') {
     let fiber = createFiber(vdom.type, vdom.props, parent);
     fiber.effectTag = 'PLACEMENT';
+    // **Initialize the hooks array on the fiber**
+    fiber.hooks = [];
     console.log(
       '[DFS] Function component fiber created:',
       vdom.type.name || vdom.type
     );
+    // Set up the global fiber so hooks can access it
+    wipFiber = fiber;
+    hookIndex = 0;
+    // Run the function component to get its children
+    const children = vdom.type(vdom.props);
+    // Build a fiber tree for its rendered output
+    fiber.child = dfs(children, fiber);
     return fiber;
   }
 
@@ -202,6 +204,36 @@ function diffFibers(currentFiber, newVdom, parentFiber = null) {
     }
     return null;
   }
+
+  // --- Handle function components ---
+  if (typeof newVdom.type === 'function') {
+    // ALWAYS create a new fiber for the work-in-progress.
+    let fiber = createFiber(
+      newVdom.type,
+      newVdom.props,
+      parentFiber,
+      currentFiber
+    );
+    fiber.effectTag = currentFiber ? 'UPDATE' : 'PLACEMENT';
+    // IMPORTANT: Initialize hooks array on the new fiber.
+    fiber.hooks = [];
+    // Set the alternate to the old fiber (if it exists) so that hooks can be read.
+    // (We assume that currentFiber is the previous render's fiber.)
+    // Set up global variables for hooks.
+    wipFiber = fiber;
+    hookIndex = 0;
+    // Run the function component to get its rendered output.
+    const rendered = newVdom.type(newVdom.props);
+    // Diff the rendered output against the old fiber's child (if any).
+    const oldFiberChild = currentFiber ? currentFiber.child : null;
+    fiber.child = diffFibers(oldFiberChild, rendered, fiber);
+    // Clear any leftover sibling pointer.
+    fiber.sibling = null;
+    return fiber;
+  }
+  // --- End function component branch ---
+
+  // --- Handle host components ---
   let newFiber = null;
   if (currentFiber && currentFiber.type === newVdom.type) {
     newFiber = createFiber(
@@ -210,6 +242,8 @@ function diffFibers(currentFiber, newVdom, parentFiber = null) {
       parentFiber,
       currentFiber
     );
+    // Reuse the existing DOM node.
+    newFiber.stateNode = currentFiber.stateNode;
     newFiber.effectTag = 'UPDATE';
     console.log('[diffFibers] Updating fiber for type:', newVdom.type);
   } else {
@@ -226,40 +260,31 @@ function diffFibers(currentFiber, newVdom, parentFiber = null) {
     }
   }
 
-  // **Force re-rendering for function components:**
-  if (typeof newVdom.type === 'function') {
-    // Call the function component with newVdom.props to get its returned VDOM.
-    const children = newVdom.type(newVdom.props);
-    console.log('[diffFibers] Function component returned:', children);
-    // Build a fiber tree from that VDOM.
-    newFiber.child = dfs(children, newFiber);
-  } else {
-    // Otherwise, diff the children as usual.
-    const newChildren = newVdom.children || [];
-    let oldChild = currentFiber ? currentFiber.child : null;
-    let prevSibling = null;
-    newChildren.forEach((child, index) => {
-      const oldChildForIndex = oldChild;
-      if (oldChild) {
-        oldChild = oldChild.sibling;
-      }
-      const childFiber = diffFibers(oldChildForIndex, child, newFiber);
-      if (index === 0) {
-        newFiber.child = childFiber;
-      } else if (prevSibling) {
-        prevSibling.sibling = childFiber;
-      }
-      prevSibling = childFiber;
-    });
-    while (oldChild) {
-      oldChild.effectTag = 'DELETION';
-      deletions.push(oldChild);
-      console.log(
-        '[diffFibers] Marking remaining old child for deletion:',
-        oldChild
-      );
+  // Diff children for host components.
+  const newChildren = (newVdom.props && newVdom.props.children) || [];
+  let oldChild = currentFiber ? currentFiber.child : null;
+  let prevSibling = null;
+  newChildren.forEach((child, index) => {
+    const oldChildForIndex = oldChild;
+    if (oldChild) {
       oldChild = oldChild.sibling;
     }
+    const childFiber = diffFibers(oldChildForIndex, child, newFiber);
+    if (index === 0) {
+      newFiber.child = childFiber;
+    } else if (prevSibling) {
+      prevSibling.sibling = childFiber;
+    }
+    prevSibling = childFiber;
+  });
+  while (oldChild) {
+    oldChild.effectTag = 'DELETION';
+    deletions.push(oldChild);
+    console.log(
+      '[diffFibers] Marking remaining old child for deletion:',
+      oldChild
+    );
+    oldChild = oldChild.sibling;
   }
   return newFiber;
 }
@@ -278,6 +303,14 @@ function createDom(fiber) {
 }
 
 function updateDom(dom, prevProps, nextProps) {
+  // If the element is a text node, update its nodeValue directly.
+  if (dom.nodeType === Node.TEXT_NODE) {
+    if (prevProps.nodeValue !== nextProps.nodeValue) {
+      dom.nodeValue = nextProps.nodeValue;
+    }
+    return;
+  }
+
   // Remove old or changed event listeners.
   Object.keys(prevProps)
     .filter((name) => name.startsWith('on'))
@@ -285,6 +318,7 @@ function updateDom(dom, prevProps, nextProps) {
       const eventType = name.toLowerCase().substring(2);
       dom.removeEventListener(eventType, prevProps[name]);
     });
+
   // Remove old properties.
   Object.keys(prevProps)
     .filter(
@@ -294,6 +328,7 @@ function updateDom(dom, prevProps, nextProps) {
     .forEach((name) => {
       dom[name] = '';
     });
+
   // Set new or changed properties.
   Object.keys(nextProps)
     .filter(
@@ -303,10 +338,12 @@ function updateDom(dom, prevProps, nextProps) {
     .forEach((name) => {
       dom[name] = nextProps[name];
     });
+
   // Update styles.
   if (nextProps.style) {
     dom.style.cssText = nextProps.style;
   }
+
   // Add event listeners.
   Object.keys(nextProps)
     .filter((name) => name.startsWith('on'))
@@ -317,9 +354,19 @@ function updateDom(dom, prevProps, nextProps) {
 }
 
 function commitDeletion(fiber, parentDom) {
+  // If this is a function component, recursively process its children without
+  // removing anything at this level (since it doesn't have its own DOM node).
+  if (typeof fiber.type === 'function') {
+    commitDeletion(fiber.child, parentDom);
+    return;
+  }
+
   console.log('[commitDeletion] Deleting fiber:', fiber);
   if (fiber.stateNode) {
-    parentDom.removeChild(fiber.stateNode);
+    if (parentDom.contains(fiber.stateNode)) {
+      parentDom.removeChild(fiber.stateNode);
+      console.log('[commitDeletion] Removed fiber stateNode:', fiber.stateNode);
+    }
   } else if (fiber.child) {
     commitDeletion(fiber.child, parentDom);
   }
@@ -328,6 +375,7 @@ function commitDeletion(fiber, parentDom) {
 function commitWork(fiber) {
   if (!fiber) return;
 
+  // For function components, simply delegate to its children.
   if (typeof fiber.type === 'function') {
     commitWork(fiber.child);
     commitWork(fiber.sibling);
@@ -382,10 +430,24 @@ function commitWork(fiber) {
 
 function commitChanges(rootFiber) {
   console.log('[commitChanges] Committing root fiber:', rootFiber);
+  // rootFiber.stateNode.innerHTML = '';
   if (rootFiber.child) {
     commitWork(rootFiber.child);
   }
-  // After commit, run effects.
+  // Process deletions—skip fibers for function components.
+  deletions.forEach((fiber) => {
+    // Skip deletion if the fiber is a function component.
+    if (typeof fiber.type === 'function') return;
+    let parentFiber = fiber.parent;
+    while (parentFiber && !parentFiber.stateNode) {
+      parentFiber = parentFiber.parent;
+    }
+    const parentDom = parentFiber ? parentFiber.stateNode : null;
+    if (parentDom) {
+      commitDeletion(fiber, parentDom);
+    }
+  });
+  deletions = [];
   runEffects(rootFiber);
 }
 
@@ -411,7 +473,10 @@ let nextUnitOfWork = null;
 let wipRoot = null;
 let currentRoot = null;
 
+let lastVDom = null;
+
 function render(vdom, container) {
+  lastVDom = vdom;
   console.log('[render] New render called with vdom:', vdom);
   if (!container) {
     throw new Error('[render] Root container is missing!');
@@ -454,7 +519,8 @@ function beginWork(fiber) {
     const children = fiber.type(fiber.props);
     console.log('[beginWork] Function component returned:', children);
     // Build a fiber tree from the returned VDOM.
-    fiber.child = dfs(children, fiber);
+    const oldFiberChild = fiber.alternate ? fiber.alternate.child : null;
+    fiber.child = diffFibers(oldFiberChild, children, fiber);
     return fiber.child;
   }
   if (typeof fiber.type === 'string' && !fiber.stateNode) {
@@ -534,11 +600,9 @@ requestIdleCallback(workLoop);
 
 // render(manualVdom, document.getElementById('root'));
 function MyComponent(props) {
-  console.log('[MyComponent] Rendering with props:', props);
-  // Use the custom useState hook
   const [name, setName] = useState(props.name);
+  console.log('[MyComponent] props:', props, 'state:', name);
 
-  // Use the custom useEffect hook
   useEffect(() => {
     console.log('[MyComponent] useEffect: Name changed to', name);
   }, [name]);
@@ -557,6 +621,14 @@ const vdom = (
     <MyComponent name='World' />
   </div>
 );
+function App() {
+  return (
+    <div className='container'>
+      <h1>Welcome</h1>
+      <MyComponent name='World' />
+    </div>
+  );
+}
 
 const container = document.getElementById('root');
-render(vdom, container);
+render(App(), container);
