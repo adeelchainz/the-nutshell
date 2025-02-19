@@ -2,7 +2,7 @@
   "plugins": [
     [
       "@babel/plugin-transform-react-jsx",
-      { "pragma": "createElement", "runtime": "classic" }
+      { "pragma": "h", "runtime": "classic" }
     ]
   ],
   "presets": [

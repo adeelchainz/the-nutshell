@@ -1,124 +1,665 @@
-/**
- * Fiber Node structure representing each unit in the Fiber tree.
- */
-function createFiberNode(type, props, parent, key) {
-  return {
-    type, // The type of element (e.g., 'div', 'button', or a Component function)
-    props, // The properties passed to this element
-    parent, // Reference to the parent Fiber node
-    child: null, // First child Fiber node
-    sibling: null, // Sibling Fiber node
-    stateNode: null, // DOM node or Component instance
-    alternate: null, // Link to previous fiber for reconciliation
-    effectTag: "PLACEMENT", // Default to "PLACEMENT"
-    key, // Key for keyed reconciliation
+/** @jsx createElement */
+
+// ---------------------
+// POLYFILL for requestIdleCallback (if needed)
+// ---------------------
+if (!window.requestIdleCallback) {
+  window.requestIdleCallback = function (cb) {
+    return setTimeout(() => {
+      cb({ timeRemaining: () => 50 });
+    }, 1);
   };
 }
 
-/**
- * Create a Fiber Tree recursively from a virtual DOM structure with keyed reconciliation.
- */
-function createFiberTree(vdom, parent, oldFiberMap = {}) {
-  if (!vdom) return null;
+const ENABLE_VISUALIZATION = false;
 
-  // Look up the old fiber by key if it exists
-  const oldFiber = oldFiberMap[vdom.key];
+// ---------------------
+// PERFORMANCE & VISUALIZATION HELPERS
+// ---------------------
+function updateVisualization(fiberTree) {
+  if (ENABLE_VISUALIZATION) {
+    renderFiberVisualization(fiberTree);
+  }
+}
 
-  const fiber = createFiberNode(vdom.type, vdom.props, parent, vdom.key);
-  fiber.alternate = oldFiber; // Link to the old fiber for reconciliation
-
-  // If it’s a DOM node (string), create the stateNode as a DOM element
-  if (typeof fiber.type === "string") {
-    if (oldFiber) {
-      fiber.stateNode = oldFiber.stateNode; // Reuse the old stateNode
-      applyProps(fiber.stateNode, fiber.props);
-    } else {
-      fiber.stateNode = document.createElement(fiber.type);
-      applyProps(fiber.stateNode, fiber.props);
+// Convert a fiber tree into a hierarchical data structure for D3.
+function convertFiberToData(fiber) {
+  // Ensure a unique ID (for D3's key functions)
+  fiber.id = fiber.id || Math.random().toString(36).substr(2, 9);
+  const data = {
+    id: fiber.id,
+    // If the fiber is a function component, show its name
+    type:
+      typeof fiber.type === 'function'
+        ? fiber.type.name || 'Function'
+        : fiber.type,
+    effectTag: fiber.effectTag,
+    children: [],
+  };
+  if (fiber.child) {
+    let child = fiber.child;
+    while (child) {
+      data.children.push(convertFiberToData(child));
+      child = child.sibling;
     }
   }
+  return data;
+}
 
-  let prevSibling = null;
+// Use D3 to render the fiber tree visualization.
+function renderFiberVisualization(rootFiber) {
+  // Convert the fiber tree to D3 hierarchy data.
+  const rootData = d3.hierarchy(convertFiberToData(rootFiber));
 
-  vdom.children?.forEach((child, index) => {
-    const childFiber = createFiberTree(child, fiber, oldFiberMap);
+  // Create a tree layout.
+  const treeLayout = d3.tree().size([400, 800]); // [height, width]
+  treeLayout(rootData);
 
-    if (childFiber) {
-      if (index === 0) {
-        fiber.child = childFiber;
-      } else {
-        prevSibling.sibling = childFiber;
-      }
+  // Select the SVG container.
+  const svg = d3.select('#visualization');
+  svg.selectAll('*').remove(); // Clear previous visualization
 
-      prevSibling = childFiber;
-    }
+  // Draw links.
+  svg
+    .selectAll('.link')
+    .data(rootData.links())
+    .enter()
+    .append('line')
+    .attr('class', 'link')
+    .attr('x1', (d) => d.source.y + 50) // +50 to add margin
+    .attr('y1', (d) => d.source.x + 50)
+    .attr('x2', (d) => d.target.y + 50)
+    .attr('y2', (d) => d.target.x + 50)
+    .attr('stroke', '#ccc');
+
+  // Draw nodes.
+  const nodeGroup = svg
+    .selectAll('.node')
+    .data(rootData.descendants())
+    .enter()
+    .append('g')
+    .attr('class', 'node')
+    .attr('transform', (d) => `translate(${d.y + 50},${d.x + 50})`);
+
+  // Color nodes based on effectTag.
+  nodeGroup
+    .append('circle')
+    .attr('r', 15)
+    .style('fill', (d) => {
+      if (d.data.effectTag === 'PLACEMENT') return 'green';
+      if (d.data.effectTag === 'UPDATE') return 'blue';
+      if (d.data.effectTag === 'DELETION') return 'red';
+      return 'gray';
+    });
+
+  nodeGroup
+    .append('text')
+    .attr('dy', '.35em')
+    .attr('x', (d) => (d.children ? -20 : 20))
+    .style('text-anchor', (d) => (d.children ? 'end' : 'start'))
+    .text((d) => d.data.type);
+}
+
+// ---------------------
+// PERFORMANCE OBSERVER SETUP
+// ---------------------
+const perfObserver = new PerformanceObserver((list) => {
+  list.getEntries().forEach((entry) => {
+    console.log(`${entry.name}: ${entry.duration.toFixed(2)} ms`);
+  });
+});
+perfObserver.observe({ entryTypes: ['measure'] });
+
+// ---------------------
+// GLOBAL HOOK VARIABLES
+// ---------------------
+let wipFiber = null; // The fiber currently rendering (for function components)
+let hookIndex = 0; // The current hook index
+
+// ---------------------
+// HOOKS IMPLEMENTATION
+// ---------------------
+function useState(initial) {
+  // Try to retrieve the old hook if available (for updates)
+  const oldHook =
+    wipFiber.alternate &&
+    wipFiber.alternate.hooks &&
+    wipFiber.alternate.hooks[hookIndex];
+
+  // Create a new hook object
+  const hook = {
+    state: oldHook ? oldHook.state : initial,
+    queue: [],
+  };
+
+  // Process any queued actions from previous renders.
+  const actions = oldHook ? oldHook.queue : [];
+  actions.forEach((action) => {
+    hook.state = typeof action === 'function' ? action(hook.state) : action;
   });
 
+  const setState = (action) => {
+    hook.queue.push(action);
+    console.log('[useState] setState called. Scheduling re-render...');
+    render(App(), currentRoot.stateNode);
+    requestIdleCallback(workLoop);
+  };
+
+  // Save the hook on the fiber and move to the next hook index.
+  wipFiber.hooks.push(hook);
+  hookIndex++;
+  return [hook.state, setState];
+}
+
+function useEffect(effect, deps) {
+  const oldHook =
+    wipFiber.alternate &&
+    wipFiber.alternate.hooks &&
+    wipFiber.alternate.hooks[hookIndex];
+  let hasChanged = true;
+  if (oldHook && deps) {
+    hasChanged = !deps.every((dep, i) => dep === oldHook.deps[i]);
+  }
+  // (Optionally, you could skip storing the effect if !hasChanged)
+  const hook = {
+    effect,
+    deps,
+    hasChanged,
+  };
+  wipFiber.hooks.push(hook);
+  hookIndex++;
+}
+
+// ---------------------
+// HELPER FUNCTIONS
+// ---------------------
+function convertStyleObjectToString(style) {
+  return Object.entries(style)
+    .map(([key, value]) => {
+      // Convert camelCase to kebab-case (e.g., backgroundColor → background-color)
+      const kebabKey = key.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+      return `${kebabKey}: ${value}`;
+    })
+    .join('; ');
+}
+
+function createTextElement(text) {
+  return {
+    type: 'TEXT_ELEMENT',
+    props: { nodeValue: text },
+    children: [],
+  };
+}
+
+// ---------------------
+// CREATE ELEMENT (JSX)
+// ---------------------
+export function createElement(type, props, ...children) {
+  // Convert style object to string if needed.
+  const style = props?.style ? convertStyleObjectToString(props.style) : '';
+
+  return {
+    type, // May be a string (for host components) or a function (for function components)
+    props: {
+      ...props,
+      style,
+      children: children.flat().map((child) => {
+        if (child == null || child === false) {
+          return createTextElement('');
+        }
+        // If child is an object or a function, leave it as is.
+        if (typeof child === 'object' || typeof child === 'function') {
+          return child;
+        }
+        // Otherwise, assume it's a primitive (e.g. a string or number)
+        return createTextElement(child);
+      }),
+    },
+  };
+}
+
+// ---------------------
+// FIBER CREATION
+// ---------------------
+function createFiber(type, props, parent = null, alternate = null) {
+  const fiber = {
+    type,
+    props: props || {},
+    stateNode: null,
+    parent,
+    child: null,
+    sibling: null,
+    alternate,
+    effectTag: null,
+    key: props ? props.key : null,
+  };
+  console.log('[createFiber] Created fiber:', fiber);
   return fiber;
 }
 
-/**
- * Apply properties (attributes and event listeners) to a DOM node.
- */
-function applyProps(node, props) {
-  for (const key in props) {
-    if (key.startsWith("on")) {
-      node.addEventListener(key.slice(2).toLowerCase(), props[key]);
-    } else {
-      node[key] = props[key];
-    }
+// ---------------------
+// INITIAL FIBER TREE CREATION (Without Diffing)
+// ---------------------
+function dfs(vdom, parent = null) {
+  if (!vdom) return null;
+  console.log('[DFS] Visiting node:', vdom);
+
+  // If vdom is a function component, create a fiber but do not process its children.
+  if (typeof vdom.type === 'function') {
+    let fiber = createFiber(vdom.type, vdom.props, parent);
+    fiber.effectTag = 'PLACEMENT';
+    // **Initialize the hooks array on the fiber**
+    fiber.hooks = [];
+    console.log(
+      '[DFS] Function component fiber created:',
+      vdom.type.name || vdom.type
+    );
+    // Set up the global fiber so hooks can access it
+    wipFiber = fiber;
+    hookIndex = 0;
+    // Run the function component to get its children
+    const children = vdom.type(vdom.props);
+    // Build a fiber tree for its rendered output
+    fiber.child = dfs(children, fiber);
+    return fiber;
   }
+
+  // Otherwise, it's a host element.
+  let fiber = createFiber(vdom.type, vdom.props, parent);
+  fiber.effectTag = 'PLACEMENT';
+  console.log("[DFS] Set effectTag 'PLACEMENT' for:", vdom.type);
+  if (typeof vdom.type === 'string') {
+    fiber.stateNode = createDom(fiber);
+    console.log('[DFS] Created DOM node for', vdom.type, ':', fiber.stateNode);
+  }
+
+  // Use vdom.props.children instead of vdom.children.
+  const children = (vdom.props && vdom.props.children) || [];
+  if (children && children.length > 0) {
+    let prevChild = null;
+    children.forEach((child, index) => {
+      const childFiber = dfs(child, fiber);
+      if (index === 0) {
+        console.log('[DFS] Setting up as first child for', vdom.type);
+        fiber.child = childFiber;
+      } else {
+        console.log('[DFS] Adding sibling for', vdom.type);
+        prevChild.sibling = childFiber;
+      }
+      prevChild = childFiber;
+    });
+  }
+  return fiber;
 }
 
-let wipRoot = null; // Work in progress root
-let currentRoot = null; // Previously committed root
-let nextUnitOfWork = null;
+// ---------------------
+// DIFFING (DOUBLE BUFFER)
+// ---------------------
 let deletions = [];
 
-/**
- * Starts the rendering and reconciliation process.
- */
-function render(vdom) {
-  console.log("Starting render", vdom);
-  const container = document.getElementById("root");
-  if (!container) {
-    console.error("No root container found!");
+function diffFibers(currentFiber, newVdom, parentFiber = null) {
+  console.log('[diffFibers] currentFiber:', currentFiber, 'newVdom:', newVdom);
+  if (!newVdom) {
+    if (currentFiber) {
+      currentFiber.effectTag = 'DELETION';
+      deletions.push(currentFiber);
+      console.log('[diffFibers] Marked for deletion:', currentFiber);
+    }
+    return null;
+  }
+
+  // --- Handle function components ---
+  if (typeof newVdom.type === 'function') {
+    // ALWAYS create a new fiber for the work-in-progress.
+    let fiber = createFiber(
+      newVdom.type,
+      newVdom.props,
+      parentFiber,
+      currentFiber
+    );
+    fiber.effectTag = currentFiber ? 'UPDATE' : 'PLACEMENT';
+    // IMPORTANT: Initialize hooks array on the new fiber.
+    fiber.hooks = [];
+    // Set the alternate to the old fiber (if it exists) so that hooks can be read.
+    // (We assume that currentFiber is the previous render's fiber.)
+    // Set up global variables for hooks.
+    wipFiber = fiber;
+    hookIndex = 0;
+    // Run the function component to get its rendered output.
+    const rendered = newVdom.type(newVdom.props);
+    // Diff the rendered output against the old fiber's child (if any).
+    const oldFiberChild = currentFiber ? currentFiber.child : null;
+    fiber.child = diffFibers(oldFiberChild, rendered, fiber);
+    // Clear any leftover sibling pointer.
+    fiber.sibling = null;
+    return fiber;
+  }
+  // --- End function component branch ---
+
+  // --- Handle host components ---
+  let newFiber = null;
+  if (currentFiber && currentFiber.type === newVdom.type) {
+    newFiber = createFiber(
+      newVdom.type,
+      newVdom.props,
+      parentFiber,
+      currentFiber
+    );
+    // Reuse the existing DOM node.
+    newFiber.stateNode = currentFiber.stateNode;
+    newFiber.effectTag = 'UPDATE';
+    console.log('[diffFibers] Updating fiber for type:', newVdom.type);
+  } else {
+    newFiber = createFiber(newVdom.type, newVdom.props, parentFiber);
+    newFiber.effectTag = 'PLACEMENT';
+    console.log('[diffFibers] Creating new fiber for type:', newVdom.type);
+    if (currentFiber) {
+      currentFiber.effectTag = 'DELETION';
+      deletions.push(currentFiber);
+      console.log(
+        '[diffFibers] Marked old fiber for deletion due to type mismatch:',
+        currentFiber
+      );
+    }
+  }
+
+  // Diff children for host components.
+  const newChildren = (newVdom.props && newVdom.props.children) || [];
+  let oldChild = currentFiber ? currentFiber.child : null;
+  let prevSibling = null;
+  newChildren.forEach((child, index) => {
+    const oldChildForIndex = oldChild;
+    if (oldChild) {
+      oldChild = oldChild.sibling;
+    }
+    const childFiber = diffFibers(oldChildForIndex, child, newFiber);
+    if (index === 0) {
+      newFiber.child = childFiber;
+    } else if (prevSibling) {
+      prevSibling.sibling = childFiber;
+    }
+    prevSibling = childFiber;
+  });
+  while (oldChild) {
+    oldChild.effectTag = 'DELETION';
+    deletions.push(oldChild);
+    console.log(
+      '[diffFibers] Marking remaining old child for deletion:',
+      oldChild
+    );
+    oldChild = oldChild.sibling;
+  }
+  return newFiber;
+}
+
+// ---------------------
+// COMMIT PHASE (APPLY CHANGES TO THE DOM)
+// ---------------------
+function createDom(fiber) {
+  console.log('[createDom] Creating DOM for fiber:', fiber);
+  const dom =
+    fiber.type === 'TEXT_ELEMENT'
+      ? document.createTextNode(fiber.props.nodeValue)
+      : document.createElement(fiber.type);
+  updateDom(dom, {}, fiber.props);
+  return dom;
+}
+
+function updateDom(dom, prevProps, nextProps) {
+  // If the element is a text node, update its nodeValue directly.
+  if (dom.nodeType === Node.TEXT_NODE) {
+    if (prevProps.nodeValue !== nextProps.nodeValue) {
+      dom.nodeValue = nextProps.nodeValue;
+    }
     return;
   }
 
-  // ✅ Create a Fiber wrapper for the root
-  const rootFiber = createFiberNode("ROOT", {}, null, null);
-  rootFiber.stateNode = container;
+  // Remove old or changed event listeners.
+  Object.keys(prevProps)
+    .filter((name) => name.startsWith('on'))
+    .forEach((name) => {
+      const eventType = name.toLowerCase().substring(2);
+      dom.removeEventListener(eventType, prevProps[name]);
+    });
 
-  // Pass the oldFiberMap to reuse fibers
-  const oldFiberMap = currentRoot ? buildFiberMap(currentRoot) : {};
+  // Remove old properties.
+  Object.keys(prevProps)
+    .filter(
+      (name) =>
+        name !== 'children' && !name.startsWith('on') && name !== 'style'
+    )
+    .forEach((name) => {
+      dom[name] = '';
+    });
 
-  wipRoot = createFiberTree(vdom, rootFiber, oldFiberMap); // ✅ Attach the Fiber tree to the root
-  wipRoot.parent = rootFiber; // ✅ Ensure the root fiber has a Fiber parent
-  wipRoot.alternate = currentRoot;
-  nextUnitOfWork = wipRoot;
-  deletions = [];
-  requestIdleCallback(workLoop);
-}
+  // Set new or changed properties.
+  Object.keys(nextProps)
+    .filter(
+      (name) =>
+        name !== 'children' && !name.startsWith('on') && name !== 'style'
+    )
+    .forEach((name) => {
+      dom[name] = nextProps[name];
+    });
 
-/**
- * Builds a map of fibers indexed by their keys for efficient lookup during reconciliation.
- */
-function buildFiberMap(fiber) {
-  const map = {};
-  function traverse(fiber) {
-    if (!fiber) return;
-    if (fiber.key) map[fiber.key] = fiber;
-    traverse(fiber.child);
-    traverse(fiber.sibling);
+  // Update styles.
+  if (nextProps.style) {
+    dom.style.cssText = nextProps.style;
   }
-  traverse(fiber);
-  return map;
+
+  // Add event listeners.
+  Object.keys(nextProps)
+    .filter((name) => name.startsWith('on'))
+    .forEach((name) => {
+      const eventType = name.toLowerCase().substring(2);
+      dom.addEventListener(eventType, nextProps[name]);
+    });
 }
 
-/**
- * Work loop that processes each fiber unit until idle time is consumed.
- */
+function commitDeletion(fiber, parentDom) {
+  // If this is a function component, recursively process its children without
+  // removing anything at this level (since it doesn't have its own DOM node).
+  if (typeof fiber.type === 'function') {
+    commitDeletion(fiber.child, parentDom);
+    return;
+  }
+
+  console.log('[commitDeletion] Deleting fiber:', fiber);
+  if (fiber.stateNode) {
+    if (parentDom.contains(fiber.stateNode)) {
+      parentDom.removeChild(fiber.stateNode);
+      console.log('[commitDeletion] Removed fiber stateNode:', fiber.stateNode);
+    }
+  } else if (fiber.child) {
+    commitDeletion(fiber.child, parentDom);
+  }
+}
+
+function commitWork(fiber) {
+  if (!fiber) return;
+
+  // For function components, simply delegate to its children.
+  if (typeof fiber.type === 'function') {
+    commitWork(fiber.child);
+    commitWork(fiber.sibling);
+    return;
+  }
+
+  let parentFiber = fiber.parent;
+  while (parentFiber && !parentFiber.stateNode) {
+    parentFiber = parentFiber.parent;
+  }
+  const parentDom = parentFiber ? parentFiber.stateNode : null;
+  if (!parentDom) {
+    console.warn('[commitWork] No parent DOM for fiber:', fiber);
+    return;
+  }
+  console.log('[commitWork] Committing fiber:', fiber);
+  if (fiber.effectTag === 'PLACEMENT') {
+    if (!fiber.stateNode) {
+      fiber.stateNode = createDom(fiber);
+      console.log(
+        '[commitWork] Created stateNode for placement:',
+        fiber.stateNode
+      );
+    }
+    parentDom.appendChild(fiber.stateNode);
+    console.log(
+      '[commitWork] Appended node:',
+      fiber.stateNode,
+      'to',
+      parentDom
+    );
+  } else if (fiber.effectTag === 'UPDATE') {
+    if (!fiber.stateNode) {
+      fiber.stateNode = createDom(fiber);
+      parentDom.appendChild(fiber.stateNode);
+      console.log(
+        '[commitWork] Created stateNode for update:',
+        fiber.stateNode
+      );
+    } else {
+      updateDom(fiber.stateNode, fiber.alternate.props, fiber.props);
+      console.log('[commitWork] Updated node:', fiber.stateNode);
+    }
+  } else if (fiber.effectTag === 'DELETION') {
+    commitDeletion(fiber, parentDom);
+    console.log('[commitWork] Deleted fiber:', fiber);
+    return;
+  }
+  commitWork(fiber.child);
+  commitWork(fiber.sibling);
+}
+
+function commitChanges(rootFiber) {
+  console.log('[commitChanges] Committing root fiber:', rootFiber);
+  // Instrument commit phase
+  performance.mark('commit-start');
+
+  if (rootFiber.child) {
+    commitWork(rootFiber.child);
+  }
+  // Process deletions—skip fibers for function components.
+  deletions.forEach((fiber) => {
+    if (typeof fiber.type === 'function') return;
+    let parentFiber = fiber.parent;
+    while (parentFiber && !parentFiber.stateNode) {
+      parentFiber = parentFiber.parent;
+    }
+    const parentDom = parentFiber ? parentFiber.stateNode : null;
+    if (parentDom) {
+      commitDeletion(fiber, parentDom);
+    }
+  });
+  deletions = [];
+  runEffects(rootFiber);
+
+  performance.mark('commit-end');
+  performance.measure('commit-phase', 'commit-start', 'commit-end');
+  updateVisualization(rootFiber);
+}
+
+function runEffects(fiber) {
+  if (!fiber) return;
+  if (typeof fiber.type === 'function' && fiber.hooks) {
+    fiber.hooks.forEach((hook) => {
+      if (hook.effect && (!fiber.alternate || hook.hasChanged)) {
+        console.log('[runEffects] Running effect for fiber:', fiber);
+        const cleanup = hook.effect();
+        hook.cleanup = cleanup;
+      }
+    });
+  }
+  runEffects(fiber.child);
+  runEffects(fiber.sibling);
+}
+
+// ---------------------
+// RENDER PHASE (BEGIN & COMPLETE WORK)
+// ---------------------
+let nextUnitOfWork = null;
+let wipRoot = null;
+let currentRoot = null;
+let lastVDom = null;
+
+function render(vdom, container) {
+  // Instrument render phase
+  performance.mark('render-start');
+
+  lastVDom = vdom;
+  console.log('[render] New render called with vdom:', vdom);
+  if (!container) {
+    throw new Error('[render] Root container is missing!');
+  }
+  if (currentRoot) {
+    console.log('[render] Diffing against currentRoot');
+    wipRoot = {
+      stateNode: container,
+      props: { children: [vdom] },
+      alternate: currentRoot,
+      type: 'ROOT',
+    };
+    wipRoot.child = diffFibers(currentRoot.child, vdom, wipRoot);
+  } else {
+    console.log('[render] First render: building tree using DFS');
+    wipRoot = {
+      stateNode: container,
+      props: { children: [vdom] },
+      alternate: null,
+      type: 'ROOT',
+    };
+    wipRoot.child = dfs(vdom, wipRoot);
+  }
+  nextUnitOfWork = wipRoot;
+  console.log('[render] wipRoot set:', wipRoot);
+
+  performance.mark('render-end');
+  performance.measure('render-phase', 'render-start', 'render-end');
+}
+
+function beginWork(fiber) {
+  console.log('[beginWork] Processing fiber:', fiber);
+  if (typeof fiber.type === 'function') {
+    console.log(
+      '[beginWork] Function component detected:',
+      fiber.type.name || fiber.type
+    );
+    wipFiber = fiber;
+    hookIndex = 0;
+    fiber.hooks = [];
+    const children = fiber.type(fiber.props);
+    console.log('[beginWork] Function component returned:', children);
+    const oldFiberChild = fiber.alternate ? fiber.alternate.child : null;
+    fiber.child = diffFibers(oldFiberChild, children, fiber);
+    return fiber.child;
+  }
+  if (typeof fiber.type === 'string' && !fiber.stateNode) {
+    fiber.stateNode = createDom(fiber);
+    console.log('[beginWork] Created DOM for fiber:', fiber);
+  }
+  return fiber.child;
+}
+
+function completeWork(fiber) {
+  console.log('[completeWork] Completing fiber:', fiber);
+}
+
+function performUnitOfWork(fiber) {
+  console.log('[performUnitOfWork] Processing fiber:', fiber);
+  let next = beginWork(fiber);
+  if (next) {
+    return next;
+  }
+  while (fiber) {
+    completeWork(fiber);
+    if (fiber.sibling) {
+      return fiber.sibling;
+    }
+    fiber = fiber.parent;
+  }
+  return null;
+}
+
 function workLoop(deadline) {
   let shouldYield = false;
   while (nextUnitOfWork && !shouldYield) {
@@ -127,8 +668,10 @@ function workLoop(deadline) {
   }
 
   if (!nextUnitOfWork && wipRoot) {
-    console.log("🚀 Committing root Fiber!");
-    commitRoot();
+    console.log('[workLoop] No more work. Committing changes...');
+    commitChanges(wipRoot);
+    currentRoot = wipRoot;
+    wipRoot = null;
   }
 
   if (nextUnitOfWork || wipRoot) {
@@ -136,300 +679,152 @@ function workLoop(deadline) {
   }
 }
 
-/**
- * Processes a single fiber node and returns the next unit of work.
- */
-function performUnitOfWork(fiber) {
-  const isFunctionComponent = typeof fiber.type === "function";
+requestIdleCallback(workLoop);
 
-  if (!isFunctionComponent) {
-    reconcile(fiber);
-  }
+// ---------------------
+// EXAMPLE USAGE
+// ---------------------
 
-  return fiber.child || fiber.sibling || findNextSibling(fiber);
+function MyComponent(props) {
+  const [name, setName] = useState(props.name);
+  console.log('[MyComponent] props:', props, 'state:', name);
+
+  useEffect(() => {
+    console.log('[MyComponent] useEffect: Name changed to', name);
+  }, [name]);
+
+  return (
+    <div className='my-component'>
+      <span>Hello</span> {name}
+      <button onClick={() => setName('Changed!')}>Change Name</button>
+    </div>
+  );
 }
 
-/**
- * Finds the next sibling fiber node in the tree.
- */
-function findNextSibling(fiber) {
-  let nextFiber = fiber;
-  while (nextFiber) {
-    if (nextFiber.sibling) return nextFiber.sibling;
-    nextFiber = nextFiber.parent;
-  }
-  return null;
+function App() {
+  return (
+    <div className='container'>
+      <h1>Welcome</h1>
+      <MyComponent name='World' />
+    </div>
+  );
 }
 
-/**
- * Reconciles the new fiber tree with the previous one.
- */
-function reconcile(fiber) {
-  const oldFiber = fiber.alternate;
-
-  if (!oldFiber) {
-    // First render, create new element
-    fiber.effectTag = "PLACEMENT";
-  } else if (oldFiber.key !== fiber.key) {
-    // Keys are different, we need to replace the element
-    fiber.effectTag = "PLACEMENT";
-  } else if (oldFiber.props !== fiber.props) {
-    // Props have changed, mark for update
-    fiber.effectTag = "UPDATE";
-  } else {
-    // No change, no effect tag needed
-    fiber.effectTag = null;
-  }
-
-  // Reconcile children
-  reconcileChildren(fiber, oldFiber);
-}
-
-function reconcileChildren(fiber, oldFiber) {
-  let prevChild = null;
-  let oldChild = oldFiber ? oldFiber.child : null;
-  let newChild = fiber.child;
-
-  // Memoization cache for reconciled child fibers
-  const memoCache = new Map();
-
-  // Convert the old and new child fibers to arrays for easier manipulation
-  const oldChildren = [];
-  const newChildren = [];
-
-  // Convert old and new fiber children linked lists to arrays
-  while (oldChild) {
-    oldChildren.push(oldChild);
-    oldChild = oldChild.sibling;
-  }
-
-  while (newChild) {
-    newChildren.push(newChild);
-    newChild = newChild.sibling;
-  }
-
-  // Apply the LCS algorithm to get the longest common subsequence
-  const lcs = findLCS(oldChildren, newChildren);
-
-  // Create a map of old fiber children for quick lookups by key
-  const oldChildMap = new Map();
-  oldChildren.forEach((child) => oldChildMap.set(child.key, child));
-
-  let prevLCSNode = null;
-  let newIndex = 0;
-
-  // Reconcile new children with old children based on the LCS
-  lcs.forEach((newChild, index) => {
-    const oldChild = oldChildren[index];
-
-    // Check the memoization cache before proceeding with reconciliation
-    if (memoCache.has(newChild.key)) {
-      const cachedChild = memoCache.get(newChild.key);
-      newChild.alternate = cachedChild.alternate; // Reuse the cached fiber
-      newChild.effectTag = cachedChild.effectTag; // Reuse the cached effect tag
-    } else {
-      // Perform reconciliation if the child is not in the cache
-      if (oldChild && oldChild.key === newChild.key) {
-        newChild.alternate = oldChild;
-        oldChild.effectTag = null; // Don't need to delete it
-        newChild.effectTag = "UPDATE"; // Reuse and update the fiber
-      } else {
-        newChild.effectTag = "PLACEMENT"; // No match, create new fiber
-      }
-
-      // Memoize the new child after reconciliation
-      memoCache.set(newChild.key, {
-        alternate: newChild.alternate,
-        effectTag: newChild.effectTag,
-      });
-    }
-
-    if (prevLCSNode) {
-      prevLCSNode.sibling = newChild;
-    } else {
-      fiber.child = newChild;
-    }
-
-    prevLCSNode = newChild;
-    newIndex++;
-  });
-
-  // Handle remaining old children (those not in the LCS)
-  oldChildren.forEach((oldChild) => {
-    if (!lcs.includes(oldChild)) {
-      oldChild.effectTag = "DELETION"; // Mark for deletion
-    }
-  });
-}
-
-/**
- * Find the longest common subsequence (LCS) of two arrays
- */
-function findLCS(oldChildren, newChildren) {
-  const m = oldChildren.length;
-  const n = newChildren.length;
-  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-
-  // Fill the DP table for LCS
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (oldChildren[i - 1].key === newChildren[j - 1].key) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
-  }
-
-  // Reconstruct the LCS from the DP table
-  let i = m;
-  let j = n;
-  const lcs = [];
-
-  while (i > 0 && j > 0) {
-    if (oldChildren[i - 1].key === newChildren[j - 1].key) {
-      lcs.unshift(newChildren[j - 1]);
-      i--;
-      j--;
-    } else if (dp[i - 1][j] > dp[i][j - 1]) {
-      i--;
-    } else {
-      j--;
-    }
-  }
-
-  return lcs;
-}
-
-/**
- * Commits all changes in the fiber tree to the actual DOM.
- */
-function commitRoot() {
-  deletions.forEach(commitDeletion);
-  const container = document.getElementById("root");
-  container.innerHTML = ""; // <-- This clears previous content
-
-  commitWork(wipRoot);
-  // if (wipRoot.stateNode && wipRoot.child) {
-  //   console.log("🌱 Appending first render to root:", wipRoot.child.stateNode);
-  //   wipRoot.stateNode.appendChild(wipRoot.child.stateNode);
-  // }
-
-  currentRoot = wipRoot; // ✅ Swap the current tree with the new one
-  wipRoot = null;
-}
-
-/**
- * Commits work (changes) to the actual DOM.
- */
-function commitWork(fiber) {
-  if (!fiber) return;
-
-  // Skip the ROOT fiber to avoid appending container to itself
-  if (fiber.type === "ROOT") {
-    commitWork(fiber.child);
-    return;
-  }
-
-  let domParentFiber = fiber.parent;
-  while (domParentFiber && !domParentFiber.stateNode) {
-    domParentFiber = domParentFiber.parent;
-  }
-  const domParent =
-    domParentFiber?.stateNode instanceof HTMLElement
-      ? domParentFiber.stateNode
-      : null;
-  if (!domParent) {
-    console.error("⚠️ No valid parent found for fiber:", fiber);
-    return;
-  }
-
-  console.log("🛠️ Committing fiber:", fiber, "to parent:", domParent);
-
-  if (fiber.effectTag === "PLACEMENT" && fiber.stateNode) {
-    console.log("📌 Appending:", fiber.stateNode, "to", domParent);
-    domParent.appendChild(fiber.stateNode);
-  } else if (fiber.effectTag === "UPDATE" && fiber.stateNode) {
-    // If the node is not already in the DOM, append it.
-    if (!fiber.stateNode.parentNode) {
-      console.log("📌 (UPDATE) Node not attached, appending:", fiber.stateNode);
-      domParent.appendChild(fiber.stateNode);
-    }
-    // Then update the node’s properties
-    applyProps(fiber.stateNode, fiber.props);
-  }
-
-  commitWork(fiber.child);
-  commitWork(fiber.sibling);
-}
-
-/**
- * Updates an existing DOM element based on new props.
- */
-function updateDom(node, oldProps, newProps) {
-  for (const key in oldProps) {
-    if (!(key in newProps)) {
-      node[key] = "";
-    }
-  }
-  for (const key in newProps) {
-    if (oldProps[key] !== newProps[key]) {
-      node[key] = newProps[key];
-    }
-  }
-}
-
-/**
- * Commits deletions to remove nodes from the DOM.
- */
-function commitDeletion(fiber) {
-  if (fiber.stateNode) {
-    let domParentFiber = fiber.parent;
-    while (!domParentFiber.stateNode) {
-      domParentFiber = domParentFiber.parent;
-    }
-    domParentFiber.stateNode.removeChild(fiber.stateNode);
-  }
-}
-
-/**
- * Example: Counter component using Fiber.
- */
-let count = 0;
-
-function increase() {
-  count++;
-  renderNewVdom(); // ✅ Re-renders with updated count
-}
-
-function renderNewVdom() {
-  const newVdom = {
-    type: "div",
-    props: {},
-    children: [
-      {
-        type: "button",
-        props: { innerText: "Increment", onclick: increase },
-        children: [],
-      },
-      { type: "p", props: { innerText: `Count: ${count}` }, children: [] },
-    ],
-  };
-
-  render(newVdom);
-}
-
-// Initial render
-const initialVdom = {
-  type: "div",
-  props: {},
-  children: [
-    {
-      type: "button",
-      props: { innerText: "Increment", onclick: increase },
-      children: [],
-    },
-    { type: "p", props: { innerText: "Count: 0" }, children: [] },
-  ],
-};
-render(initialVdom);
+// ---------------------
+// Demo Components
+// ---------------------
+// A simple counter component.
+// function Counter() {
+//   const [count, setCount] = useState(0);
+//   useEffect(() => {
+//     console.log('[Counter] Count updated:', count);
+//   }, [count]);
+//   return (
+//     <div style={{ margin: '20px', padding: '10px', border: '1px solid #ccc' }}>
+//       <h2>Counter: {count}</h2>
+//       <button onClick={() => setCount(count + 1)}>Increment</button>
+//     </div>
+//   );
+// }
+// // An animated box that bounces horizontally.
+// // Using a simple module-level flag for demonstration:
+// let animationStarted = false;
+// // Using a simple module-level flag for demonstration:
+// function AnimatedBox() {
+//   const [{ position, direction }, setBox] = useState({
+//     position: 0,
+//     direction: 1,
+//   });
+//   const [running, setRunning] = useState(true);
+//   useEffect(() => {
+//     let animationFrameId;
+//     const animate = () => {
+//       setBox((prev) => {
+//         let newPos = prev.position + prev.direction * 5;
+//         let newDirection = prev.direction;
+//         // Bounce when reaching boundaries (0 and 300)
+//         if (newPos > 300 || newPos < 0) {
+//           newDirection = -prev.direction;
+//           newPos = Math.max(0, Math.min(300, newPos));
+//         }
+//         return { position: newPos, direction: newDirection };
+//       });
+//       // Only schedule the next frame if animation is running
+//       if (running) {
+//         animationFrameId = requestAnimationFrame(animate);
+//       }
+//     };
+//     // Start the animation loop if running
+//     if (running) {
+//       animationFrameId = requestAnimationFrame(animate);
+//     }
+//     // Cleanup: cancel the scheduled frame on unmount or when running changes
+//     return () => cancelAnimationFrame(animationFrameId);
+//   }, [running]); // Re-run this effect whenever the running state changes
+//   return (
+//     <div
+//       style={{
+//         position: 'relative',
+//         width: '350px',
+//         height: '150px',
+//         border: '2px solid #333',
+//         margin: '20px',
+//       }}
+//     >
+//       <div
+//         style={{
+//           position: 'absolute',
+//           left: position + 'px',
+//           top: '25px',
+//           width: '50px',
+//           height: '50px',
+//           backgroundColor: 'blue',
+//         }}
+//       ></div>
+//       <button
+//         style={{ marginTop: '80px', display: 'block' }}
+//         onClick={() => setRunning((prev) => !prev)}
+//       >
+//         {running ? 'Stop Animation' : 'Start Animation'}
+//       </button>
+//     </div>
+//   );
+// }
+// // (Existing) A component demonstrating state and effect hooks.
+// function MyComponent(props) {
+//   const [name, setName] = useState(props.name);
+//   console.log('[MyComponent] props:', props, 'state:', name);
+//   useEffect(() => {
+//     console.log('[MyComponent] useEffect: Name changed to', name);
+//   }, [name]);
+//   return (
+//     <div
+//       className='my-component'
+//       style={{ margin: '20px', padding: '10px', border: '1px solid #f90' }}
+//     >
+//       <span>Hello</span> {name}
+//       <button
+//         onClick={() => setName('Changed!')}
+//         style={{ marginLeft: '10px' }}
+//       >
+//         Change Name
+//       </button>
+//     </div>
+//   );
+// }
+// // The main App component that brings everything together.
+// function App() {
+//   return (
+//     <div style={{ fontFamily: 'Arial, sans-serif', padding: '20px' }}>
+//       <h1>Fiber Architecture Demo</h1>
+//       <Counter />
+//       <AnimatedBox />
+//       <MyComponent name='Fiber' />
+//     </div>
+//   );
+// }
+// // ---------------------
+// // Render the App
+// // ---------------------
+const container = document.getElementById('root');
+render(App(), container);
