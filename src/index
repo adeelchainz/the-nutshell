@@ -1,6 +1,0 @@
-import { render } from '../packages/signals/renderer.js';
-import { App } from './Counter.js';
-import ListComponent from './listExample.js';
-
-const root = document.getElementById('root');
-render(ListComponent, root);
