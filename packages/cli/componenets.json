@@ -1,0 +1,13 @@
+{
+    "components": [
+      {
+        "name": "button",
+        "path": "https://your-repo.com/components/button.tsx"
+      },
+      {
+        "name": "input",
+        "path": "https://your-repo.com/components/input.tsx"
+      }
+    ]
+  }
+  
