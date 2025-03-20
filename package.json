@@ -6,11 +6,16 @@
     "apps/*",
     "packages/*"
   ],
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+ "scripts": {
+  "start:web": "npm --workspace=@the-nutshell/monster run dev",
+  "start:server": "npm --workspace=@the-nutshell/server run start",
+  "start": "concurrently \"npm run start:web\" \"npm run start:server\""
+},
   "keywords": [],
   "author": "Syed Adeel",
   "license": "ISC",
-  "description": ""
+  "description": "",
+  "dependencies": {
+    "concurrently": "^9.1.2"
+  }
 }
